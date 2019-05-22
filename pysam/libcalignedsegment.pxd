@@ -72,6 +72,7 @@ cdef class PileupColumn:
     cdef uint32_t min_base_quality
     cdef uint8_t * buf
     cdef char * reference_sequence
+    cdef int max_depth
 
 cdef class PileupRead:
     cdef int32_t  _qpos
@@ -95,7 +96,8 @@ cdef PileupColumn makePileupColumn(
     int n_pu,
     uint32_t min_base_quality,
     char * reference_sequence,
-    AlignmentHeader header)
+    AlignmentHeader header, 
+    int max_depth)
 
 cdef PileupRead makePileupRead(bam_pileup1_t * src,
 		               AlignmentHeader header)

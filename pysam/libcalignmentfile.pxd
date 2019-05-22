@@ -63,6 +63,7 @@ cdef class PileupColumn:
     cdef int tid
     cdef int pos
     cdef int n_pu
+    cdef int max_depth
 
 
 cdef class PileupRead:

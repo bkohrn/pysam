@@ -1,4 +1,3 @@
-
 # cython: embedsignature=True
 # cython: profile=True
 ########################################################
@@ -62,6 +61,8 @@ import warnings
 import array
 from libc.errno  cimport errno, EPIPE
 from libc.string cimport strcmp, strpbrk, strerror
+from libc.stdint cimport INT32_MAX
+
 from cpython cimport array as c_array
 from cpython.version cimport PY_MAJOR_VERSION
 
@@ -94,7 +95,8 @@ IndexStats = collections.namedtuple("IndexStats",
 ########################################################
 ## global variables
 # maximum genomic coordinace
-cdef int  MAX_POS = 2 << 29
+# for some reason, using 'int' causes overlflow
+cdef int MAX_POS = (1 << 31) - 1
 
 # valid types for SAM headers
 VALID_HEADER_TYPES = {"HD" : collections.Mapping,
@@ -416,7 +418,8 @@ cdef class AlignmentHeader(object):
         # convert to python string
         t = self.__str__()
         for line in t.split("\n"):
-            if not line.strip():
+            line = line.strip(' \0')
+            if not line:
                 continue
             assert line.startswith("@"), \
                 "header line without '@': '%s'" % line
@@ -1314,8 +1317,9 @@ cdef class AlignmentFile(HTSFile):
         an iterator over genomic positions.
 
         """
-        cdef int rtid, rstart, rstop, has_coord
-
+        cdef int rtid, has_coord
+        cdef int32_t rstart, rstop
+        
         if not self.is_open:
             raise ValueError("I/O operation on closed file")
 
@@ -2054,7 +2058,6 @@ cdef class IteratorRowRegion(IteratorRow):
 
         IteratorRow.__init__(self, samfile,
                              multiple_iterators=multiple_iterators)
-
         with nogil:
             self.iter = sam_itr_queryi(
                 self.index,
@@ -2615,6 +2618,7 @@ cdef class IteratorColumnRegion(IteratorColumn):
         self.start = start
         self.stop = stop
         self.truncate = truncate
+        
 
     def __next__(self):
 
@@ -2640,7 +2644,8 @@ cdef class IteratorColumnRegion(IteratorColumn):
                                     self.n_plp,
                                     self.min_base_quality,
                                     self.iterdata.seq,
-                                    self.samfile.header)
+                                    self.samfile.header, 
+                                    self.max_depth)
 
 
 cdef class IteratorColumnAllRefs(IteratorColumn):
@@ -2682,7 +2687,8 @@ cdef class IteratorColumnAllRefs(IteratorColumn):
                                     self.n_plp,
                                     self.min_base_quality,
                                     self.iterdata.seq,
-                                    self.samfile.header)
+                                    self.samfile.header, 
+                                    self.max_depth)
 
 
 cdef class SNPCall:
