@@ -12,6 +12,7 @@ from cpython cimport PyBytes_Check, PyUnicode_Check
 from cpython cimport array as c_array
 from libc.stdlib cimport calloc, free
 from libc.string cimport strncpy
+from libc.stdint cimport INT32_MAX, int32_t
 from libc.stdio cimport fprintf, stderr, fflush
 from libc.stdio cimport stdout as c_stdout
 from posix.fcntl cimport open as c_open, O_WRONLY
@@ -24,7 +25,7 @@ from libcbcftools cimport bcftools_main, bcftools_set_stdout, bcftools_set_stder
 
 #####################################################################
 # hard-coded constants
-cdef int MAX_POS = 2 << 29
+cdef int MAX_POS = (1 << 31) - 1
 
 #################################################################
 # Utility functions for quality string conversions
@@ -201,51 +202,58 @@ cpdef parse_region(contig=None,
        for invalid or out of bounds regions.
 
     """
-    cdef long long rstart
-    cdef long long rend
+    cdef int32_t rstart
+    cdef int32_t rstop
 
-    if contig is not None:
-        reference = contig
-    if stop is not None:
-        end = stop
+    
+    if reference is not None:
+        if contig is not None:
+           raise ValueError('contig and reference should not both be specified')
+        contig = reference
+
+    if contig is not None and region is not None:
+        raise ValueError('contig/reference and region should not both be specified')
+        
+    if end is not None:
+        if stop is not None:
+            raise ValueError('stop and end should not both be specified')
+        stop = end
+
+    if contig is None and region is None:
+        raise ValueError("neither contig nor region are given")
 
     rstart = 0
-    rend = MAX_POS
-    if start != None:
+    rstop = MAX_POS
+    if start is not None:
         try:
             rstart = start
         except OverflowError:
             raise ValueError('start out of range (%i)' % start)
 
-    if end != None:
+    if stop is not None:
         try:
-            rend = end
+            rstop = stop
         except OverflowError:
-            raise ValueError('end out of range (%i)' % end)
+            raise ValueError('stop out of range (%i)' % stop)
 
     if region:
-        region = force_str(region)
         if ":" in region:
             contig, coord = region.split(":")
             parts = coord.split("-")
             rstart = int(parts[0]) - 1
             if len(parts) >= 1:
-                rend = int(parts[1])
+                rstop = int(parts[1])
         else:
             contig = region
 
-    if not reference:
-        return None, 0, 0
-
+    if rstart > rstop:
+        raise ValueError('invalid coordinates: start (%i) > stop (%i)' % (rstart, rstop))
     if not 0 <= rstart < MAX_POS:
         raise ValueError('start out of range (%i)' % rstart)
-    if not 0 <= rend <= MAX_POS:
-        raise ValueError('end out of range (%i)' % rend)
-    if rstart > rend:
-        raise ValueError(
-            'invalid region: start (%i) > end (%i)' % (rstart, rend))
+    if not 0 <= rstop <= MAX_POS:
+        raise ValueError('stop out of range (%i)' % rstop)
 
-    return force_bytes(reference), rstart, rend
+    return contig, rstart, rstop
 
 
 def _pysam_dispatch(collection,
@@ -266,9 +274,25 @@ def _pysam_dispatch(collection,
     False.
     '''
 
-    if method == "index":
-        if args and not os.path.exists(args[0]):
-            raise IOError("No such file or directory: '%s'" % args[0])
+    if method == "index" and args:
+        # We make sure that at least 1 input file exists,
+        # and if it doesn't we raise an IOError.
+        SIMPLE_FLAGS = ['-c', '--csi', '-f', '--force', '-t', '--tbi', '-n', '--nstats', '-s', '--stats']
+        ARGUMENTS = ['-m', '--min-shift', '-o', '--output-file', '--threads', '-@']
+        skip_next = False
+        for arg in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in SIMPLE_FLAGS or (len(arg) > 2 and arg.startswith('-@')):
+                continue
+            if arg in ARGUMENTS:
+                skip_next = True
+                continue
+            if not os.path.exists(arg):
+                raise IOError("No such file or directory: '%s'" % arg)
+            else:
+                break
             
     if args is None:
         args = []

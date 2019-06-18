@@ -69,7 +69,6 @@ from cpython cimport array as c_array
 from libc.stdint cimport INT8_MIN, INT16_MIN, INT32_MIN, \
     INT8_MAX, INT16_MAX, INT32_MAX, \
     UINT8_MAX, UINT16_MAX, UINT32_MAX
-from libc.stdio cimport snprintf
 
 from pysam.libchtslib cimport HTS_IDX_NOCOOR
 from pysam.libcutils cimport force_bytes, force_str, \
@@ -88,9 +87,6 @@ cdef bint IS_PYTHON3 = PY_MAJOR_VERSION >= 3
 # cigar code to character and vice versa
 cdef char* CODE2CIGAR= "MIDNSHP=XB"
 cdef int NCIGAR_CODES = 10
-
-# dimensioned for 8000 pileup limit (+ insertions/deletions)
-cdef uint32_t MAX_PILEUP_BUFFER_SIZE = 10000
 
 if IS_PYTHON3:
     CIGAR2CODE = dict([y, x] for x, y in enumerate(CODE2CIGAR))
@@ -632,9 +628,8 @@ cdef PileupColumn makePileupColumn(bam_pileup1_t ** plp,
     dest.n_pu = n_pu
     dest.min_base_quality = min_base_quality
     dest.reference_sequence = reference_sequence
-    dest.buf = <uint8_t *>calloc(MAX_PILEUP_BUFFER_SIZE, sizeof(uint8_t))
-    if dest.buf == NULL:
-        raise MemoryError("could not allocate pileup buffer")
+    dest.buf.l = dest.buf.m = 0
+    dest.buf.s = NULL
 
     return dest
 
@@ -1853,10 +1848,9 @@ cdef class AlignedSegment:
         return s
 
     def get_forward_qualities(self):
-        """return the original read sequence.
+        """return base qualities of the read sequence.
         
-        Reads mapping to the reverse strand will be reverse
-        complemented.
+        Reads mapping to the reverse strand will be reversed.
         """
         if self.is_reverse:
             return self.query_qualities[::-1]
@@ -2799,8 +2793,7 @@ cdef class PileupColumn:
             "\n".join(map(str, self.pileups))
 
     def __dealloc__(self):
-        if self.buf is not NULL:
-            free(self.buf)
+        free(self.buf.s)
 
     def set_min_base_quality(self, min_base_quality):
         """set the minimum base quality for this pileup column.
@@ -2854,6 +2847,10 @@ cdef class PileupColumn:
             # out of sync.
             for x from 0 <= x < self.n_pu:
                 p = &(self.plp[0][x])
+                if p == NULL:
+                    raise ValueError(
+                        "pileup buffer out of sync - most likely use of iterator "
+                        "outside loop")
                 if pileup_base_qual_skip(p, self.min_base_quality):
                     continue
                 pileups.append(makePileupRead(p, self.header))
@@ -2896,8 +2893,15 @@ cdef class PileupColumn:
         cdef uint32_t c = 0
         cdef uint32_t cnt = 0
         cdef bam_pileup1_t * p = NULL
+        if self.plp == NULL or self.plp[0] == NULL:
+            raise ValueError("PileupColumn accessed after iterator finished")
+        
         for x from 0 <= x < self.n_pu:
             p = &(self.plp[0][x])
+            if p == NULL:
+                raise ValueError(
+                    "pileup buffer out of sync - most likely use of iterator "
+                    "outside loop")
             if pileup_base_qual_skip(p, self.min_base_quality):
                 continue
             cnt += 1
@@ -2960,30 +2964,34 @@ cdef class PileupColumn:
         cdef uint32_t x = 0
         cdef uint32_t j = 0
         cdef uint32_t c = 0
-        cdef uint32_t n = 0
         cdef uint8_t cc = 0
         cdef uint8_t rb = 0
-        cdef uint8_t * buf = self.buf
+        cdef kstring_t * buf = &self.buf
         cdef bam_pileup1_t * p = NULL
+        
+        if self.plp == NULL or self.plp[0] == NULL:
+            raise ValueError("PileupColumn accessed after iterator finished")
+
+        buf.l = 0
 
         # todo: reference sequence to count matches/mismatches
         # todo: convert assertions to exceptions
         for x from 0 <= x < self.n_pu:
             p = &(self.plp[0][x])
+            if p == NULL:
+                raise ValueError(
+                    "pileup buffer out of sync - most likely use of iterator "
+                    "outside loop")
             if pileup_base_qual_skip(p, self.min_base_quality):
                 continue
             # see samtools pileup_seq
             if mark_ends and p.is_head:
-                buf[n] = '^'
-                n += 1
-                assert n < MAX_PILEUP_BUFFER_SIZE
+                kputc('^', buf)
                 
                 if p.b.core.qual > 93:
-                    buf[n] = 126
+                    kputc(126, buf)
                 else:
-                    buf[n] = p.b.core.qual + 33
-                n += 1
-                assert n < MAX_PILEUP_BUFFER_SIZE
+                    kputc(p.b.core.qual + 33, buf)
             if not p.is_del:
                 if p.qpos < p.b.core.l_qseq:
                     cc = <uint8_t>seq_nt16_str[bam_seqi(bam_get_seq(p.b), p.qpos)]
@@ -2994,68 +3002,44 @@ cdef class PileupColumn:
                     rb = self.reference_sequence[self.reference_pos]
                     if seq_nt16_table[cc] == seq_nt16_table[rb]:
                         cc = "="
-                buf[n] = strand_mark_char(cc, p.b)
-                n += 1
-                assert n < MAX_PILEUP_BUFFER_SIZE
+                kputc(strand_mark_char(cc, p.b), buf)
             elif add_indels:
                 if p.is_refskip:
                     if bam_is_rev(p.b):
-                        buf[n] = '<'
+                        kputc('<', buf)
                     else:
-                        buf[n] = '>'
+                        kputc('>', buf)
                 else:
-                    buf[n] = '*'
-                n += 1
-                assert n < MAX_PILEUP_BUFFER_SIZE
+                    kputc('*', buf)
             if add_indels:
                 if p.indel > 0:
-                    buf[n] = '+'
-                    n += 1
-                    assert n < MAX_PILEUP_BUFFER_SIZE
-                    n += snprintf(<char *>&(buf[n]),
-                                  MAX_PILEUP_BUFFER_SIZE - n,
-                                  "%i",
-                                  p.indel)
-                    assert n < MAX_PILEUP_BUFFER_SIZE
+                    kputc('+', buf)
+                    kputw(p.indel, buf)
                     for j from 1 <= j <= p.indel:
                         cc = seq_nt16_str[bam_seqi(bam_get_seq(p.b), p.qpos + j)]
-                        buf[n] = strand_mark_char(cc, p.b)
-                        n += 1
-                        assert n < MAX_PILEUP_BUFFER_SIZE
+                        kputc(strand_mark_char(cc, p.b), buf)
                 elif p.indel < 0:
-                    buf[n] = '-'
-                    n += 1
-                    assert n < MAX_PILEUP_BUFFER_SIZE
-                    n += snprintf(<char *>&(buf[n]),
-                                  MAX_PILEUP_BUFFER_SIZE - n,
-                                  "%i",
-                                  -p.indel)
-                    assert n < MAX_PILEUP_BUFFER_SIZE
+                    kputc('-', buf)
+                    kputw(-p.indel, buf)
                     for j from 1 <= j <= -p.indel:
                         # TODO: out-of-range check here?
                         if self.reference_sequence == NULL:
                             cc = 'N'
                         else:
                             cc = self.reference_sequence[self.reference_pos + j]
-                        buf[n] = strand_mark_char(cc, p.b)
-                        n += 1
-                        assert n < MAX_PILEUP_BUFFER_SIZE
+                        kputc(strand_mark_char(cc, p.b), buf)
             if mark_ends and p.is_tail:
-                buf[n] = '$'
-                n += 1
-                assert n < MAX_PILEUP_BUFFER_SIZE
+                kputc('$', buf)
 
-            buf[n] = ':'
-            n += 1
-            assert n < MAX_PILEUP_BUFFER_SIZE
+            kputc(':', buf)
 
-        if n == 0:
+        if buf.l == 0:
             # could be zero if all qualities are too low
             return ""
         else:
             # quicker to ensemble all and split than to encode all separately.
             # ignore last ":"
-            return force_str(PyBytes_FromStringAndSize(<char*>buf, n-1)).split(":")
+            return force_str(PyBytes_FromStringAndSize(buf.s, buf.l-1)).split(":")
 
     def get_query_qualities(self):
         """query base quality scores at pileup column position.
@@ -3071,6 +3055,11 @@ cdef class PileupColumn:
         result = []
         for x from 0 <= x < self.n_pu:
             p = &(self.plp[0][x])
+            if p == NULL:
+                raise ValueError(
+                    "pileup buffer out of sync - most likely use of iterator "
+                    "outside loop")
+            
             if p.qpos < p.b.core.l_qseq:
                 c = bam_get_qual(p.b)[p.qpos]
             else:
@@ -3088,11 +3077,19 @@ cdef class PileupColumn:
 
         list: a list of quality scores
         """
+        if self.plp == NULL or self.plp[0] == NULL:
+            raise ValueError("PileupColumn accessed after iterator finished")
+        
         cdef uint32_t x = 0
         cdef bam_pileup1_t * p = NULL
         result = []
         for x from 0 <= x < self.n_pu:
             p = &(self.plp[0][x])
+            if p == NULL:
+                raise ValueError(
+                    "pileup buffer out of sync - most likely use of iterator "
+                    "outside loop")
+            
             if pileup_base_qual_skip(p, self.min_base_quality):
                 continue
             result.append(p.b.core.qual)
@@ -3106,12 +3103,19 @@ cdef class PileupColumn:
 
         list: a list of read positions
         """
+        if self.plp == NULL or self.plp[0] == NULL:
+            raise ValueError("PileupColumn accessed after iterator finished")
 
         cdef uint32_t x = 0
         cdef bam_pileup1_t * p = NULL
         result = []
         for x from 0 <= x < self.n_pu:
             p = &(self.plp[0][x])
+            if p == NULL:
+                raise ValueError(
+                    "pileup buffer out of sync - most likely use of iterator "
+                    "outside loop")
+            
             if pileup_base_qual_skip(p, self.min_base_quality):
                 continue
             result.append(p.qpos)
@@ -3125,11 +3129,19 @@ cdef class PileupColumn:
 
         list: a list of query names at pileup column position.
         """
+        if self.plp == NULL or self.plp[0] == NULL:
+            raise ValueError("PileupColumn accessed after iterator finished")
+        
         cdef uint32_t x = 0
         cdef bam_pileup1_t * p = NULL
         result = []
         for x from 0 <= x < self.n_pu:
             p = &(self.plp[0][x])
+            if p == NULL:
+                raise ValueError(
+                    "pileup buffer out of sync - most likely use of iterator "
+                    "outside loop")
+            
             if pileup_base_qual_skip(p, self.min_base_quality):
                 continue
             result.append(charptr_to_str(pysam_bam_get_qname(p.b)))

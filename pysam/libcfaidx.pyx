@@ -214,7 +214,7 @@ cdef class FastaFile:
         return False
 
     property closed:
-        """"bool indicating the current state of the file object.
+        """bool indicating the current state of the file object.
         This is a read-only attribute; the close() method changes the value.
         """
         def __get__(self):
@@ -231,7 +231,7 @@ cdef class FastaFile:
             return self._references
 
     property nreferences:
-        """"int with the number of :term:`reference` sequences in the file.
+        """int with the number of :term:`reference` sequences in the file.
         This is a read-only attribute."""
         def __get__(self):
             return len(self._references) if self.references else None
@@ -287,19 +287,20 @@ cdef class FastaFile:
         cdef char *ref
         cdef int rstart, rend
 
-        reference, rstart, rend = parse_region(reference, start, end, region)
+        contig, rstart, rend = parse_region(reference, start, end, region)
 
-        if reference is None:
+        if contig is None:
             raise ValueError("no sequence/region supplied.")
 
         if rstart == rend:
             return ""
 
-        ref = reference
+        contig_b = force_bytes(contig)
+        ref = contig_b
         with nogil:
             length = faidx_seq_len(self.fastafile, ref)
         if length == -1:
-            raise KeyError("sequence '%s' not present" % reference)
+            raise KeyError("sequence '%s' not present" % contig)
         if rstart >= length:
             return ""
 
@@ -315,7 +316,7 @@ cdef class FastaFile:
             if errno:
                 raise IOError(errno, strerror(errno))
             else:
-                raise ValueError("failure when retrieving sequence on '%s'" % reference)
+                raise ValueError("failure when retrieving sequence on '%s'" % contig)
 
         try:
             return charptr_to_str(seq)
@@ -609,7 +610,7 @@ cdef class FastxFile:
         return False
 
     property closed:
-        """"bool indicating the current state of the file object.
+        """bool indicating the current state of the file object.
         This is a read-only attribute; the close() method changes the value.
         """
         def __get__(self):

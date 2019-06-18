@@ -1,4 +1,3 @@
-
 # cython: embedsignature=True
 # cython: profile=True
 ########################################################
@@ -62,6 +61,8 @@ import warnings
 import array
 from libc.errno  cimport errno, EPIPE
 from libc.string cimport strcmp, strpbrk, strerror
+from libc.stdint cimport INT32_MAX
+
 from cpython cimport array as c_array
 from cpython.version cimport PY_MAJOR_VERSION
 
@@ -94,7 +95,8 @@ IndexStats = collections.namedtuple("IndexStats",
 ########################################################
 ## global variables
 # maximum genomic coordinace
-cdef int  MAX_POS = 2 << 29
+# for some reason, using 'int' causes overlflow
+cdef int MAX_POS = (1 << 31) - 1
 
 # valid types for SAM headers
 VALID_HEADER_TYPES = {"HD" : collections.Mapping,
@@ -344,7 +346,7 @@ cdef class AlignmentHeader(object):
         return makeAlignmentHeader(bam_hdr_dup(self.ptr))
 
     property nreferences:
-        """"int with the number of :term:`reference` sequences in the file.
+        """int with the number of :term:`reference` sequences in the file.
 
         This is a read-only attribute."""
         def __get__(self):
@@ -416,7 +418,8 @@ cdef class AlignmentHeader(object):
         # convert to python string
         t = self.__str__()
         for line in t.split("\n"):
-            if not line.strip():
+            line = line.strip(' \0')
+            if not line:
                 continue
             assert line.startswith("@"), \
                 "header line without '@': '%s'" % line
@@ -1314,8 +1317,9 @@ cdef class AlignmentFile(HTSFile):
         an iterator over genomic positions.
 
         """
-        cdef int rtid, rstart, rstop, has_coord
-
+        cdef int rtid, has_coord
+        cdef int32_t rstart, rstop
+        
         if not self.is_open:
             raise ValueError("I/O operation on closed file")
 
@@ -1895,7 +1899,7 @@ cdef class AlignmentFile(HTSFile):
         return self.header.get_reference_length(reference)
     
     property nreferences:
-        """"int with the number of :term:`reference` sequences in the file.
+        """int with the number of :term:`reference` sequences in the file.
         This is a read-only attribute."""
         def __get__(self):
             if self.header:
@@ -2054,7 +2058,6 @@ cdef class IteratorRowRegion(IteratorRow):
 
         IteratorRow.__init__(self, samfile,
                              multiple_iterators=multiple_iterators)
-
         with nogil:
             self.iter = sam_itr_queryi(
                 self.index,
@@ -2608,10 +2611,11 @@ cdef class IteratorColumnRegion(IteratorColumn):
                   int start = 0,
                   int stop = MAX_POS,
                   int truncate = False,
+                  int multiple_iterators = False,
                   **kwargs ):
 
         # initialize iterator
-        self._setup_iterator(tid, start, stop, 1)
+        self._setup_iterator(tid, start, stop, multiple_iterators)
         self.start = start
         self.stop = stop
         self.truncate = truncate
